@@ -1,0 +1,136 @@
+import os
+import sqlite3
+import re
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+
+DB_PATH     = 'db/emails.db'
+EMBED_MODEL = 'all-MiniLM-L6-v2'
+LEX_LIMIT   = 10
+SEM_LIMIT   = 10
+
+# preload model
+_embedder = SentenceTransformer(EMBED_MODEL)
+
+# in‐memory caches
+_ALL = {
+    'ids': None,
+    'subjects': None,
+    'bodies': None,
+    'embeddings': None
+}
+
+def _fast_summarize(text, max_sentences=3):
+    sent = re.split(r'(?<=[\.!?])\s+', text.strip())
+    return ' '.join(sent[:max_sentences])
+
+def _ensure_fts_index():
+    conn = sqlite3.connect(DB_PATH); cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS email_fts;")
+    cur.execute("""
+      CREATE VIRTUAL TABLE email_fts
+      USING fts4(subject, body, content='emails');
+    """)
+    cur.execute("""
+      INSERT INTO email_fts(rowid, subject, body)
+      SELECT id, subject, body FROM emails;
+    """)
+    conn.commit(); conn.close()
+
+def _load_corpus_embeddings():
+    if _ALL['ids'] is not None:
+        return
+    conn = sqlite3.connect(DB_PATH); cur = conn.cursor()
+    cur.execute("SELECT id, subject, body FROM emails;")
+    rows = cur.fetchall()
+    conn.close()
+
+    _ALL['ids']      = [r[0] for r in rows]
+    _ALL['subjects'] = [r[1] for r in rows]
+    _ALL['bodies']   = [r[2] for r in rows]
+
+    print(f"🔧 Embedding {_ALL['ids'].__len__()} emails…")
+    _ALL['embeddings'] = _embedder.encode(_ALL['bodies'], show_progress_bar=True)
+
+def _fts_search(query):
+    """
+    Lexical search via FTS4 on subject+body, requiring ALL tokens.
+    Splits the user’s query on whitespace, then joins with AND so
+    only emails containing every term (in subject or body) are returned.
+    """
+    # Build an AND-style FTS query: "foo bar" → "foo AND bar"
+    terms    = [t for t in query.strip().split() if t]
+    fts_q    = ' AND '.join(terms) if len(terms) > 1 else terms[0]
+
+    conn     = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur      = conn.cursor()
+    cur.execute(f"""
+      SELECT e.id, e.subject, e.body
+        FROM email_fts
+        JOIN emails e ON e.id = email_fts.rowid
+       WHERE email_fts MATCH ?
+       LIMIT ?
+    """, (fts_q, LEX_LIMIT))
+    rows = cur.fetchall()
+    conn.close()
+
+    return [dict(r) for r in rows]
+
+def _semantic_search(q):
+    _load_corpus_embeddings()
+    qv = _embedder.encode([q])[0].astype('float32')
+    mats = np.dot(_ALL['embeddings'], qv) / (
+        np.linalg.norm(_ALL['embeddings'], axis=1) * np.linalg.norm(qv)
+    )
+    top = np.argsort(mats)[::-1][:SEM_LIMIT]
+    return [
+        {'id':_ALL['ids'][i],
+         'subject':_ALL['subjects'][i],
+         'body':_ALL['bodies'][i],
+         'sim_score': float(mats[i])}
+        for i in top
+    ]
+
+def _summarize_and_categorize(results):
+    # summaries
+    for r in results:
+        r['summary'] = _fast_summarize(r.get('body',''))
+    # clustering
+    texts = [r['summary'] for r in results]
+    if len(texts) > 1:
+        embs   = _embedder.encode(texts)
+        k      = min(len(texts), 3)
+        km     = KMeans(n_clusters=k, random_state=0).fit(embs)
+        labels = km.labels_
+    else:
+        labels = [0]*len(texts)
+    for r,lab in zip(results, labels):
+        r['category'] = int(lab)
+    return results
+
+# Public API
+def search_emails(query):
+    """
+    Run hybrid search on `query`, returning a dict:
+    {
+      'lexical': [ {id,subject,body,summary,category}, … ],
+      'semantic':[ {id,subject,body,sim_score,summary,category}, … ]
+    }
+    """
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError("No emails.db found; run ingestion first.")
+
+    # build FTS index once
+    _ensure_fts_index()
+
+    # lexical & semantic
+    lex = _fts_search(query)
+    sem = _semantic_search(query)
+
+    # on-demand enrich only these hits
+    lex = _summarize_and_categorize(lex)
+    sem = _summarize_and_categorize(sem)
+
+    return {'lexical': lex, 'semantic': sem}
