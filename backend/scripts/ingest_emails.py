@@ -132,7 +132,7 @@ def compute_threads(buffered):
                 # No in_reply_to for pure replies
                 m['in_reply_to']  = None
                 m['thread_root']  = m['message_id']
-                m['is_reply']     = False   # or True, depending on how you want to flag this
+                m['is_reply']     = False   # or True, depending on how want to flag this
 
     return buffered
 

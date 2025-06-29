@@ -3,6 +3,7 @@
 # -------------------------
 
 /backend/scripts/__pycache__/*
+/backend/utils/__pycache__/*
 /backend/*.py[cod]
 /backend/*$py.class
 

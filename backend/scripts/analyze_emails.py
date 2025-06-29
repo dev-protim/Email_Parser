@@ -12,7 +12,7 @@ from sklearn.cluster import KMeans
 DB_PATH = './db/emails.db'
 SUMMARY_MODEL = 'facebook/bart-large-cnn'
 EMBED_MODEL   = 'all-MiniLM-L6-v2'
-NUM_CLUSTERS  = 5  # you can tune this
+NUM_CLUSTERS  = 5  # Can tune this
 
 def add_columns():
     """Add summary & category columns if they don’t exist."""

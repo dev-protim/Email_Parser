@@ -4,6 +4,14 @@ import re
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
+from transformers import pipeline
+import torch
+from scripts.info_extraction import enrich_with_info_extraction
+from utils.entity_extraction import extract_actors, extract_events, extract_relationships
+
+# Force single-process mode to prevent semaphore leaks
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ['OMP_NUM_THREADS'] = '1'
 
 DB_PATH     = 'db/emails.db'
 EMBED_MODEL = 'all-MiniLM-L6-v2'
@@ -12,6 +20,25 @@ SEM_LIMIT   = 10
 
 # preload model
 _embedder = SentenceTransformer(EMBED_MODEL)
+
+# Classification labels
+_LABELS = [
+    "legal", "financial", "project discussion",
+    "human resources", "operations", "general"
+]
+
+_classifier = None
+
+def get_classifier():
+    global _classifier
+    if _classifier is None:
+        device = 0 if torch.cuda.is_available() else -1
+        _classifier = pipeline(
+            "zero-shot-classification",
+            model="facebook/bart-large-mnli",
+            device=device
+        )
+    return _classifier
 
 # in‐memory caches
 _ALL = {
@@ -206,12 +233,28 @@ def _summarize_and_categorize(results):
     if len(texts) > 1:
         embs   = _embedder.encode(texts)
         k      = min(len(texts), 3)
-        km     = KMeans(n_clusters=k, random_state=0).fit(embs)
+        # km     = KMeans(n_clusters=k, random_state=0).fit(embs)
+        km = KMeans(n_clusters=k, random_state=0, n_init=10).fit(embs)
         labels = km.labels_
     else:
         labels = [0]*len(texts)
     for r,lab in zip(results, labels):
         r['category'] = int(lab)
+
+    # 3. Zero-shot classification (LAZY LOAD 🔥)
+    # classifier = get_classifier()
+    for r in results:
+        text = r.get('body', '') or r.get('summary', '')
+    #     out  = classifier(text, _LABELS)
+    #     r['classification'] = out['labels'][0]
+    #     print(f"[CLASSIFY] {r['subject']} → {out['labels'][0]}")
+
+
+        # NEW ADDITIONS:
+        r['actors'] = extract_actors(text)
+        r['events'] = extract_events(text)
+        r['relationships'] = extract_relationships(text)
+
     return results
 
 # Public API
@@ -236,6 +279,16 @@ def search_emails(query):
     # on-demand enrich only these hits
     # lex = _summarize_and_categorize(lex)
     sem = _summarize_and_categorize(sem)
+    sem = enrich_with_info_extraction(sem)
 
     return {'semantic': sem}
     # return {'lexical': lex, 'semantic': sem}
+
+# Clean up function to call at program exit
+def cleanup():
+    """Call this function when the program exits to clean up resources"""
+    global _embedder, _classifier
+    if _embedder is not None:
+        del _embedder
+    if _classifier is not None:
+        del _classifier
