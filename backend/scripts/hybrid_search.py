@@ -53,6 +53,50 @@ def _load_corpus_embeddings():
     print(f"🔧 Embedding {_ALL['ids'].__len__()} emails…")
     _ALL['embeddings'] = _embedder.encode(_ALL['bodies'], show_progress_bar=True)
 
+def _load_limited_embeddings(query, top_k=50):
+    """
+    Load and embed top_k FTS results for semantic comparison.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    # Create AND-style FTS query
+    terms = [t for t in query.strip().split() if t]
+    fts_q = ' AND '.join(terms) if len(terms) > 1 else terms[0]
+
+    cur.execute(f"""
+      SELECT e.id, e.subject, e.body, e.sender, e.receiver
+        FROM email_fts
+        JOIN emails e ON e.id = email_fts.rowid
+       WHERE email_fts MATCH ?
+       LIMIT ?
+    """, (fts_q, int(top_k)))
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return {
+            'ids': [], 'subjects': [], 'bodies': [],
+            'senders': [], 'receivers': [], 'embeddings': np.array([])
+        }
+
+    ids       = [r['id'] for r in rows]
+    subjects  = [r['subject'] for r in rows]
+    bodies    = [r['body'] for r in rows]
+    senders   = [r['sender'] for r in rows]
+    receivers = [r['receiver'] for r in rows]
+    embs      = _embedder.encode(bodies, show_progress_bar=False)
+
+    return {
+        'ids': ids,
+        'subjects': subjects,
+        'bodies': bodies,
+        'senders': senders,
+        'receivers': receivers,
+        'embeddings': embs
+    }
+
 def _fts_search(query):
     """
     Lexical search via FTS4 on subject+body, requiring ALL tokens.
@@ -79,19 +123,79 @@ def _fts_search(query):
     return [dict(r) for r in rows]
 
 def _semantic_search(q):
-    _load_corpus_embeddings()
-    qv = _embedder.encode([q])[0].astype('float32')
-    mats = np.dot(_ALL['embeddings'], qv) / (
-        np.linalg.norm(_ALL['embeddings'], axis=1) * np.linalg.norm(qv)
+    local_data = _load_limited_embeddings(q, top_k=100)
+
+    # Deduplicate by body content
+    seen = set()
+    unique_data = {
+        'ids': [], 'subjects': [], 'bodies': [],
+        'senders': [], 'receivers': []
+    }
+
+    for i in range(len(local_data['bodies'])):
+        body = local_data['bodies'][i]
+        if body not in seen:
+            seen.add(body)
+            unique_data['ids'].append(local_data['ids'][i])
+            unique_data['subjects'].append(local_data['subjects'][i])
+            unique_data['bodies'].append(body)
+            unique_data['senders'].append(local_data['senders'][i])
+            unique_data['receivers'].append(local_data['receivers'][i])
+
+    if not unique_data['bodies']:
+        return []
+
+    embs = _embedder.encode(unique_data['bodies'], show_progress_bar=False)
+    qv   = _embedder.encode([q])[0].astype('float32')
+    mats = np.dot(embs, qv) / (
+        np.linalg.norm(embs, axis=1) * np.linalg.norm(qv)
     )
     top = np.argsort(mats)[::-1][:SEM_LIMIT]
+
     return [
-        {'id':_ALL['ids'][i],
-         'subject':_ALL['subjects'][i],
-         'body':_ALL['bodies'][i],
-         'sim_score': float(mats[i])}
+        {
+            'id': unique_data['ids'][i],
+            'subject': unique_data['subjects'][i],
+            'body': unique_data['bodies'][i],
+            'sender': unique_data['senders'][i],
+            'receiver': unique_data['receivers'][i],
+            'sim_score': float(mats[i])
+        }
         for i in top
     ]
+    # # _load_corpus_embeddings()
+    # local_data = _load_limited_embeddings(q, top_k=50)
+
+    # if len(local_data['embeddings']) == 0:
+    #     return []  # ✅ Return empty if no results
+    
+    # qv = _embedder.encode([q])[0].astype('float32')
+    # mats = np.dot(local_data['embeddings'], qv) / (
+    #     np.linalg.norm(local_data['embeddings'], axis=1) * np.linalg.norm(qv)
+    # )
+    # # mats = np.dot(_ALL['embeddings'], qv) / (
+    # #     np.linalg.norm(_ALL['embeddings'], axis=1) * np.linalg.norm(qv)
+    # # )
+    # top = np.argsort(mats)[::-1][:SEM_LIMIT]
+    # return [
+    #     {
+    #         'id': local_data['ids'][i],
+    #         'subject': local_data['subjects'][i],
+    #         'body': local_data['bodies'][i],
+    #         'sender': local_data['senders'][i],
+    #         'receiver': local_data['receivers'][i],
+    #         'sim_score': float(mats[i])
+    #     }
+    #     for i in top
+    # ]
+    
+    # # return [
+    # #     {'id':_ALL['ids'][i],
+    # #      'subject':_ALL['subjects'][i],
+    # #      'body':_ALL['bodies'][i],
+    # #      'sim_score': float(mats[i])}
+    # #     for i in top
+    # # ]
 
 def _summarize_and_categorize(results):
     # summaries
@@ -126,11 +230,12 @@ def search_emails(query):
     _ensure_fts_index()
 
     # lexical & semantic
-    lex = _fts_search(query)
+    # lex = _fts_search(query)
     sem = _semantic_search(query)
 
     # on-demand enrich only these hits
-    lex = _summarize_and_categorize(lex)
+    # lex = _summarize_and_categorize(lex)
     sem = _summarize_and_categorize(sem)
 
-    return {'lexical': lex, 'semantic': sem}
+    return {'semantic': sem}
+    # return {'lexical': lex, 'semantic': sem}

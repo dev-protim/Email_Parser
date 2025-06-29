@@ -2,7 +2,7 @@
 # Python files (INSIDE backend/)
 # -------------------------
 
-/backend/__pycache__/
+/backend/scripts/__pycache__/*
 /backend/*.py[cod]
 /backend/*$py.class
 

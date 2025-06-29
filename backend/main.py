@@ -50,7 +50,7 @@ def search():
         results = search_emails(q)
         return jsonify({
             'query': q,
-            'lexical': results['lexical'],
+            # 'lexical': results['lexical'],
             'semantic': results['semantic']
         })
     except Exception as e:
