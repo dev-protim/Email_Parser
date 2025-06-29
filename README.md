@@ -32,4 +32,5 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 # Run
-python main.py
+1. First add all of your enron files into /backend/INEnron/
+2. Then run python main.py
